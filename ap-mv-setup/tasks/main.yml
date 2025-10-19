@@ -1,0 +1,139 @@
+---
+# ----------------------------------------------------------------------------------
+# 1. PREREQUISITES AND COMMON SETUP
+# ----------------------------------------------------------------------------------
+- name: Update apt cache and Install Java (Prerequisite for both) ☕
+  ansible.builtin.apt:
+    name: default-jdk
+    state: present
+    update_cache: yes
+  become: true
+
+# ----------------------------------------------------------------------------------
+# 2. APACHE MAVEN INSTALLATION
+# ----------------------------------------------------------------------------------
+- name: Maven | Define installation facts
+  ansible.builtin.set_fact:
+    maven_version: "3.3.9"
+    maven_install_dir: "/opt/apache-maven-3.3.9"
+    maven_filename: "apache-maven-3.3.9-bin.tar.gz"
+    maven_download_url: "https://archive.apache.org/dist/maven/maven-3/3.3.9/binaries/apache-maven-3.3.9-bin.tar.gz"
+
+- name: Maven | Download and Extract Maven tarball to /opt
+  ansible.builtin.unarchive:
+    src: "{{ maven_download_url }}"
+    dest: "/opt"
+    remote_src: true
+    creates: "{{ maven_install_dir }}/README.txt" # Idempotency check
+  become: true
+
+- name: Maven | Set up symlink using update-alternatives
+  ansible.builtin.command:
+    cmd: "update-alternatives --install /usr/bin/mvn maven {{ maven_install_dir }}/bin/mvn 1001"
+    creates: /usr/bin/mvn
+  become: true
+
+- name: Maven | Set Maven environment variables globally
+  ansible.builtin.blockinfile:
+    path: /etc/profile.d/maven.sh
+    create: true
+    block: |
+      export M2_HOME={{ maven_install_dir }}
+      export MAVEN_HOME={{ maven_install_dir }}
+      export PATH=$PATH:$M2_HOME/bin
+    mode: '0755'
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - Maven Environment"
+  become: true
+
+# ----------------------------------------------------------------------------------
+# 3. APACHE TOMCAT INSTALLATION
+# ----------------------------------------------------------------------------------
+- name: Tomcat | Define installation facts
+  ansible.builtin.set_fact:
+    tomcat_version: "8.5.31"
+    tomcat_install_dir: "/opt/tomcat"
+    java_home_path: "/usr/lib/jvm/java-1.8.0-openjdk-amd64/jre"
+
+- name: Tomcat | Ensure 'tomcat' group and user exist
+  ansible.builtin.group:
+    name: tomcat
+    state: present
+  become: true
+
+- name: Tomcat | Create 'tomcat' user
+  ansible.builtin.user:
+    name: tomcat
+    group: tomcat
+    home: "{{ tomcat_install_dir }}"
+    shell: /bin/false
+    create_home: false
+  become: true
+
+- name: Tomcat | Create and prepare Tomcat installation directory
+  ansible.builtin.file:
+    path: "{{ tomcat_install_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Tomcat | Download and Extract Apache Tomcat tarball
+  ansible.builtin.unarchive:
+    src: "https://archive.apache.org/dist/tomcat/tomcat-8/v8.5.31/bin/apache-tomcat-8.5.31.tar.gz"
+    dest: "{{ tomcat_install_dir }}"
+    remote_src: true
+    extra_opts: ["--strip-components=1"]
+    creates: "{{ tomcat_install_dir }}/LICENSE"
+  become: true
+
+- name: Tomcat | Set ownership and permissions
+  ansible.builtin.file:
+    path: "{{ tomcat_install_dir }}/{{ item.path }}"
+    owner: tomcat
+    group: tomcat
+    state: directory
+    recurse: true
+    mode: "{{ item.mode | default(omit) }}"
+  loop:
+    - { path: ".", mode: '0755' }
+    - { path: "conf", mode: 'g+r,g+x' }
+    - { path: "webapps" }
+    - { path: "work" }
+    - { path: "temp" }
+    - { path: "logs" }
+  become: true
+
+- name: Tomcat | Copy Tomcat systemd service file
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/tomcat.service"
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Apache Tomcat Web Application Container
+      After=network.target
+
+      [Service]
+      Type=forking
+
+      Environment=JAVA_HOME={{ java_home_path }}
+      Environment=CATALINA_PID=/opt/tomcat/temp/tomcat.pid
+      Environment=CATALINA_HOME=/opt/tomcat
+      Environment=CATALINA_BASE=/opt/tomcat
+      Environment='CATALINA_OPTS=-Xms512M -Xmx1024M -server -XX:+UseParallelGC'
+      Environment='JAVA_OPTS=-Djava.awt.headless=true -Djava.security.egd=file:/dev/./urandom'
+
+      ExecStart=/opt/tomcat/bin/startup.sh
+      ExecStop=/opt/tomcat/bin/shutdown.sh
+
+      User=tomcat
+      Group=tomcat
+      UMask=0007
+      RestartSec=10
+      Restart=always
+
+      [Install]
+      WantedBy=multi-user.target
+  notify:
+    - Reload systemd and start tomcat
+  become: true

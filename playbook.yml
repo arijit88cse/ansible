@@ -1,0 +1,7 @@
+---
+
+- name: Install Development Environment (Tomcat and Maven)
+  hosts: localhost
+  become: true
+  roles:
+    - ap-mv-setup
